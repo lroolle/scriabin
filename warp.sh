@@ -1,6 +1,80 @@
 #!/usr/bin/env bash
 
 version='0.0.1'
+
+# Check if jq is installed
+if ! command -v jq &> /dev/null; then
+    echo "[INFO] Installing jq..."
+    if command -v apt &> /dev/null; then
+        apt update && apt install -y jq
+    elif command -v yum &> /dev/null; then
+        yum install -y jq
+    else
+        echo "[ERROR] Package manager not supported. Please install jq manually."
+        exit 1
+    fi
+fi
+
+Register_Teams_Account() {
+    if [[ ${teams_mode} -eq 1 ]]; then
+        log INFO "Registering Teams account..."
+        wg_private_key="$(wg genkey)"
+        wg_public_key="$(printf %s "${wg_private_key}" | wg pubkey)"
+        reg="$(curl -s --header 'User-Agent: okhttp/3.12.1' \
+            --header 'CF-Client-Version: a-6.16-2483' \
+            --header 'Accept: application/json; charset=UTF-8' \
+            --header 'Content-Type: application/json' \
+            --header "CF-Access-Jwt-Assertion: ${teams_ephemeral_token}" \
+            --request "POST" \
+            --data '{"key":"'"${wg_public_key}"'","install_id":"","fcm_token":"","model":"","serial_number":"","locale":"en_US"}' \
+            'https://api.cloudflareclient.com/v0a2483/reg')"
+
+        if [ $? -ne 0 ] || [ -z "${reg}" ]; then
+            log ERROR "Failed to register Teams account"
+            exit 1
+        fi
+
+        # Extract required values from registration response
+        wg_addresses_v4=$(echo "${reg}" | jq -r '.config.interface.addresses.v4')
+        wg_addresses_v6=$(echo "${reg}" | jq -r '.config.interface.addresses.v6')
+        wg_peer_pubkey=$(echo "${reg}" | jq -r '.config.peers[0].public_key')
+        
+        if [ "${wg_addresses_v4}" = "null" ] || [ "${wg_addresses_v6}" = "null" ] || [ "${wg_peer_pubkey}" = "null" ]; then
+            log ERROR "Invalid registration response from Cloudflare"
+            exit 1
+        fi
+
+        mkdir -p "${WGCF_ProfileDir}"
+        
+        # Create WGCF profile with Teams info
+        cat >"${WGCF_ProfilePath}" <<-EOF
+[Interface]
+PrivateKey = ${wg_private_key}
+Address = ${wg_addresses_v4}, ${wg_addresses_v6}
+DNS = 1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001
+
+[Peer]
+PublicKey = ${wg_peer_pubkey}
+Endpoint = ${WireGuard_Peer_Endpoint_IPv4}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+    fi
+}
+
+Generate_WGCF_Profile() {
+    if [[ ${teams_mode} -eq 1 ]]; then
+        Register_Teams_Account
+    else
+        while [[ ! -f ${WGCF_Profile} ]]; do
+            Register_WARP_Account
+            log INFO "WARP WireGuard profile (wgcf-profile.conf) generation in progress..."
+            wgcf generate
+        done
+        Uninstall_wgcf
+    fi
+}
+
 CF_Trace_URL='https://www.cloudflare.com/cdn-cgi/trace'
 TestIPv4_1='1.1.1.1'
 TestIPv4_2='1.0.0.1'
@@ -298,19 +372,6 @@ Register_WARP_Account() {
         yes | wgcf register
         sleep 5
     done
-}
-
-Generate_WGCF_Profile() {
-    if [[ ${teams_mode} -eq 1 ]]; then
-        Register_Teams_Account
-    else
-        while [[ ! -f ${WGCF_Profile} ]]; do
-            Register_WARP_Account
-            log INFO "WARP WireGuard profile (wgcf-profile.conf) generation in progress..."
-            wgcf generate
-        done
-        Uninstall_wgcf
-    fi
 }
 
 Backup_WGCF_Profile() {
@@ -1072,56 +1133,3 @@ if [ $# -ge 1 ]; then
 else
     Print_Usage
 fi
-
-# Add teams support functions
-Register_Teams_Account() {
-    if [[ ${teams_mode} -eq 1 ]]; then
-        log INFO "Registering Teams account..."
-        wg_private_key="$(wg genkey)"
-        wg_public_key="$(printf %s "${wg_private_key}" | wg pubkey)"
-        reg="$(curl -s --header 'User-Agent: okhttp/3.12.1' \
-            --header 'CF-Client-Version: a-6.16-2483' \
-            --header 'Accept: application/json; charset=UTF-8' \
-            --header 'Content-Type: application/json' \
-            --header "CF-Access-Jwt-Assertion: ${teams_ephemeral_token}" \
-            --request "POST" \
-            --data '{"key":"'"${wg_public_key}"'","install_id":"","fcm_token":"","model":"","serial_number":"","locale":"en_US"}' \
-            'https://api.cloudflareclient.com/v0a2483/reg')"
-
-        if [ $? -ne 0 ]; then
-            log ERROR "Failed to register Teams account"
-            exit 1
-        fi
-
-        # Extract and store necessary information
-        device_id=$(echo "${reg}" | jq -r '.id')
-        account_id=$(echo "${reg}" | jq -r '.account.id')
-        token=$(echo "${reg}" | jq -r '.token')
-
-        # Create WGCF profile with Teams info
-        cat >"${WGCF_ProfilePath}" <<-EOF
-[Interface]
-PrivateKey = ${wg_private_key}
-Address = $(echo "${reg}" | jq -r '.config.interface.addresses.v4'), $(echo "${reg}" | jq -r '.config.interface.addresses.v6')
-DNS = 1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001
-
-[Peer]
-PublicKey = $(echo "${reg}" | jq -r '.config.peers[0].public_key')
-Endpoint = $(echo "${reg}" | jq -r '.config.peers[0].endpoint.v4')
-AllowedIPs = 0.0.0.0/0, ::/0
-EOF
-    fi
-}
-
-Generate_WGCF_Profile() {
-    if [[ ${teams_mode} -eq 1 ]]; then
-        Register_Teams_Account
-    else
-        while [[ ! -f ${WGCF_Profile} ]]; do
-            Register_WARP_Account
-            log INFO "WARP WireGuard profile (wgcf-profile.conf) generation in progress..."
-            wgcf generate
-        done
-        Uninstall_wgcf
-    fi
-}
