@@ -2,7 +2,7 @@
  * Required Environment Variables:
  * - FASTLINK_USERNAME: The username/email for Fastlink login
  * - FASTLINK_PASSWORD: The password for Fastlink login
- * 
+ *
  * Optional Environment Variables:
  * - BARK_SERVER: The Bark server URL for notifications
  * - BARK_DEVICE_KEY: The Bark device key for notifications
@@ -19,68 +19,100 @@ addEventListener("fetch", (event) => {
 async function handleFetchEvent(event) {
   try {
     const url = new URL(event.request.url);
-    const testBark = url.searchParams.get('bark') === 'true';
+    const testBark = url.searchParams.get("bark") === "true";
     const result = await handleCheckinProcess(testBark);
     return new Response(result, {
-      headers: { "Content-Type": "text/plain" },
+      headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   } catch (error) {
     return new Response(`Error: ${error.message}`, {
       status: 500,
-      headers: { "Content-Type": "text/plain" },
+      headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
 }
 
 async function handleScheduledEvent(event) {
   try {
-    await handleCheckinProcess();
+    await handleCheckinProcess(true);
   } catch (error) {
     console.error("Error during scheduled event:", error);
   }
 }
 
-async function handleCheckinProcess(forceBark = false) {
-  let resultMsg = [];
-  const loginCookies = await login();
-  
-  if (!loginCookies) {
-    const msg = "Login failed: No cookies received or login credentials are incorrect";
-    console.log(msg);
-    return msg;
-  }
+async function handleCheckinProcess(sendBark = false) {
+  const resultMsg = [];
 
-  const homePageInfo = await checkUserHomePage(loginCookies);
-  if (!homePageInfo) {
-    const msg = "Failed to get homepage info";
-    console.log(msg);
-    return msg;
-  }
-
-  // Format next reset date
-  const nextResetDate = getNextResetDate(homePageInfo.expiryDate);
-  const formattedResetDate = nextResetDate.toISOString().split('T')[0];
-
-  resultMsg.push(`Today Used: ${homePageInfo.usedToday}`);
-  resultMsg.push(`Unused Traffic: ${homePageInfo.unusedTraffic || homePageInfo.remainingTraffic}`);
-  resultMsg.push(`Days Until Reset: ${homePageInfo.daysUntilReset} days`);
-  resultMsg.push(`Next Reset: ${formattedResetDate}`);
-
-  if (homePageInfo.canCheckIn) {
-    const checkinMsg = await checkin(loginCookies);
-    resultMsg.push(`Check-in Status: ${checkinMsg}`);
-    if ((typeof BARK_SERVER !== 'undefined' && typeof BARK_DEVICE_KEY !== 'undefined') || forceBark) {
-      await sendBarkNotification(checkinMsg, homePageInfo, false);
+  try {
+    const loginCookies = await login();
+    if (!loginCookies) {
+      return logAndReturn(
+        "Login failed: No cookies received or login credentials are incorrect",
+      );
     }
-  } else {
-    const msg = "Already checked in for today.";
-    resultMsg.push(`Check-in Status: ${msg}`);
-    if ((typeof BARK_SERVER !== 'undefined' && typeof BARK_DEVICE_KEY !== 'undefined') || forceBark) {
-      await sendBarkNotification("", homePageInfo, true);
+
+    const homePageInfo = await checkUserHomePage(loginCookies);
+    if (!homePageInfo) {
+      return logAndReturn("Failed to get homepage info");
     }
+
+    // Generate formatted result messages
+    addTrafficInfo(resultMsg, homePageInfo);
+
+    if (homePageInfo.canCheckIn) {
+      await handleCheckIn(resultMsg, loginCookies, homePageInfo, sendBark);
+    } else {
+      await handleAlreadyCheckedIn(resultMsg, homePageInfo, sendBark);
+    }
+  } catch (error) {
+    console.error("An error occurred during the check-in process:", error);
+    resultMsg.push("Error: Unable to complete the check-in process.");
   }
 
   return resultMsg.join("\n");
+}
+
+// Helper Functions
+function logAndReturn(message) {
+  console.log(message);
+  return message;
+}
+
+function addTrafficInfo(resultMsg, homePageInfo) {
+  const nextResetDate = getNextResetDate(homePageInfo.expiryDate);
+  const formattedResetDate = nextResetDate.toISOString().split("T")[0];
+
+  const htmlContent = `
+    Today Used: ${homePageInfo.usedToday}<br>
+    Unused Traffic: ${homePageInfo.unusedTraffic || homePageInfo.remainingTraffic}<br>
+    Days Until Reset: ${homePageInfo.daysUntilReset} days<br>
+    Next Reset: ${formattedResetDate}<br>
+  `;
+  resultMsg.push(htmlContent.trim());
+}
+
+async function handleCheckIn(resultMsg, loginCookies, homePageInfo, sendBark) {
+  const checkinMsg = await checkin(loginCookies);
+  resultMsg.push(`Check-in Status: ${checkinMsg}`);
+
+  if (sendBark && isBarkEnabled()) {
+    await sendBarkNotification(checkinMsg, homePageInfo, false);
+  }
+}
+
+async function handleAlreadyCheckedIn(resultMsg, homePageInfo, sendBark) {
+  const msg = "Already checked in for today.";
+  resultMsg.push(`Check-in Status: ${msg}`);
+
+  if (sendBark && isBarkEnabled()) {
+    await sendBarkNotification("", homePageInfo, true);
+  }
+}
+
+function isBarkEnabled() {
+  return (
+    typeof BARK_SERVER !== "undefined" && typeof BARK_DEVICE_KEY !== "undefined"
+  );
 }
 
 async function login() {
@@ -189,10 +221,10 @@ async function checkUserHomePage(cookies) {
 }
 
 function extractHomePageData(html) {
-  let canCheckIn = !html.includes('明日再来');
+  let canCheckIn = !html.includes("明日再来");
   let { totalTraffic, usedToday, remainingTraffic } = extractTrafficData(html);
   let { unusedTraffic, expiryDate } = extractUserData(html);
-  
+
   // Calculate days
   const now = new Date();
   const nextReset = new Date(now.getFullYear(), now.getMonth(), 25);
@@ -201,14 +233,14 @@ function extractHomePageData(html) {
   }
   const daysUntilReset = Math.ceil((nextReset - now) / (1000 * 60 * 60 * 24));
 
-  return { 
-    canCheckIn, 
-    totalTraffic, 
-    usedToday, 
+  return {
+    canCheckIn,
+    totalTraffic,
+    usedToday,
     remainingTraffic,
     unusedTraffic,
     daysUntilReset,
-    expiryDate
+    expiryDate,
   };
 }
 
@@ -231,19 +263,19 @@ function extractTrafficData(html) {
 function extractUserData(html) {
   let unusedTraffic = "0GB";
   let expiryDate = "";
-  
+
   // Extract unused traffic from Crisp data
   const unusedMatch = html.match(/\["Unused_Traffic",\s*"([^"]+)"\]/);
   if (unusedMatch) {
     unusedTraffic = unusedMatch[1];
   }
-  
+
   // Extract expiry date from Crisp data
   const expiryMatch = html.match(/\["Class_Expire",\s*"([^"]+)"\]/);
   if (expiryMatch) {
     expiryDate = expiryMatch[1];
   }
-  
+
   return { unusedTraffic, expiryDate };
 }
 
@@ -251,21 +283,21 @@ function getNextResetDate(expiryDate) {
   const now = new Date();
   const currentMonth = now.getMonth();
   const currentYear = now.getFullYear();
-  
+
   // If we have expiry date, use its day as reset day
   if (expiryDate) {
     const expiry = new Date(expiryDate);
     const resetDay = expiry.getDate();
     const resetDate = new Date(currentYear, currentMonth, resetDay);
-    
+
     // If we've passed this month's reset date, move to next month
     if (now.getDate() >= resetDay) {
       resetDate.setMonth(resetDate.getMonth() + 1);
     }
-    
+
     return resetDate;
   }
-  
+
   // Fallback to 25th if no expiry date
   const resetDate = new Date(currentYear, currentMonth, 25);
   if (now.getDate() >= 25) {
@@ -279,27 +311,27 @@ async function sendBarkNotification(
   { usedToday, unusedTraffic, remainingTraffic, daysUntilReset, expiryDate },
   alreadyCheckedIn,
 ) {
-  // Check if Bark notification is properly configured
-  if (typeof BARK_SERVER === 'undefined' || typeof BARK_DEVICE_KEY === 'undefined') {
-    console.log("Bark notification skipped: BARK_SERVER or BARK_DEVICE_KEY not configured");
+  if (
+    typeof BARK_SERVER === "undefined" ||
+    typeof BARK_DEVICE_KEY === "undefined"
+  ) {
+    console.log(
+      "Bark notification skipped: BARK_SERVER or BARK_DEVICE_KEY not configured",
+    );
     return;
   }
 
-  const title = "Fastlink Status";
   const traffic = unusedTraffic || remainingTraffic;
   const nextResetDate = getNextResetDate(expiryDate);
-  const formattedResetDate = nextResetDate.toISOString().split('T')[0];
-  let body;
+  const formattedResetDate = nextResetDate.toISOString().split("T")[0];
 
-  if (alreadyCheckedIn) {
-    body = `Already checked in | Used: ${usedToday} | Remaining: ${traffic} | Next Reset: ${formattedResetDate}`;
-  } else {
-    body = `${checkinMsg} | Used: ${usedToday} | Remaining: ${traffic} | Next Reset: ${formattedResetDate}`;
-  }
+  const body = alreadyCheckedIn
+    ? `Checked in | ${usedToday}/${traffic} | Days: ${daysUntilReset} | Reset: ${formattedResetDate}`
+    : `${checkinMsg} | ${usedToday}/${traffic} | Days: ${daysUntilReset} | Reset: ${formattedResetDate}`;
 
   const barkUrl = `${BARK_SERVER}/push`;
   const data = {
-    title: title,
+    title: "Fastlink Status",
     body: body,
     group: "fastlink",
     device_key: BARK_DEVICE_KEY,
