@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-version='0.0.1'
+version='0.0.3'
 
 # Check if jq is installed
 if ! command -v jq &> /dev/null; then
@@ -14,6 +14,14 @@ if ! command -v jq &> /dev/null; then
         exit 1
     fi
 fi
+
+# Add default Tailscale IP ranges near the top of the file with other variables
+WireGuard_Interface='wgcf'
+WireGuard_ConfPath="/etc/wireguard/${WireGuard_Interface}.conf"
+
+# Add Tailscale default ranges
+Tailscale_IPv4_Range='100.64.0.0/10'
+Tailscale_IPv6_Range='fd7a:115c:a1e0::/48'
 
 Register_Teams_Account() {
     if [[ ${teams_mode} -eq 1 ]]; then
@@ -38,14 +46,14 @@ Register_Teams_Account() {
         wg_addresses_v4=$(echo "${reg}" | jq -r '.config.interface.addresses.v4')
         wg_addresses_v6=$(echo "${reg}" | jq -r '.config.interface.addresses.v6')
         wg_peer_pubkey=$(echo "${reg}" | jq -r '.config.peers[0].public_key')
-        
+
         if [ "${wg_addresses_v4}" = "null" ] || [ "${wg_addresses_v6}" = "null" ] || [ "${wg_peer_pubkey}" = "null" ]; then
             log ERROR "Invalid registration response from Cloudflare"
             exit 1
         fi
 
         mkdir -p "${WGCF_ProfileDir}"
-        
+
         # Create WGCF profile with Teams info
         cat >"${WGCF_ProfilePath}" <<-EOF
 [Interface]
@@ -704,6 +712,11 @@ Address = ${WireGuard_Interface_Address}
 DNS = ${WireGuard_Interface_DNS}
 MTU = ${WireGuard_Interface_MTU}
 EOF
+
+    # Add Tailscale exclusion rules if tailscale_dev is set
+    if [[ -n "${tailscale_dev}" ]]; then
+        Generate_WireGuardProfile_Interface_Rule_Tailscale
+    fi
 }
 
 Generate_WireGuardProfile_Interface_Rule_TableOff() {
@@ -764,6 +777,17 @@ PublicKey = ${WireGuard_Peer_PublicKey}
 AllowedIPs = ${WireGuard_Peer_AllowedIPs}
 Endpoint = ${WireGuard_Peer_Endpoint}
 EOF
+}
+
+Generate_WireGuardProfile_Interface_Rule_Tailscale() {
+    if [[ -n "${tailscale_dev}" ]]; then
+        cat <<EOF >>${WireGuard_ConfPath}
+PostUp = ip -4 route add ${Tailscale_IPv4_Range} dev ${tailscale_dev} || true
+PostUp = ip -6 route add ${Tailscale_IPv6_Range} dev ${tailscale_dev} || true
+PostDown = ip -4 route del ${Tailscale_IPv4_Range} dev ${tailscale_dev} || true
+PostDown = ip -6 route del ${Tailscale_IPv6_Range} dev ${tailscale_dev} || true
+EOF
+    fi
 }
 
 Check_WARP_Client_Status() {
@@ -1045,6 +1069,9 @@ SUBCOMMANDS:
     version         Prints version information
     help            Prints this message
     -t TOKEN        Teams JWT token for Cloudflare Teams enrollment
+    --ts-dev DEV    Tailscale device name (e.g. tailscale0) to exclude Tailscale networks
+    --ts-ipv4 CIDR  Tailscale IPv4 range to exclude (default: 100.64.0.0/10)
+    --ts-ipv6 CIDR  Tailscale IPv6 range to exclude (default: fd7a:115c:a1e0::/48)
 
 Regarding Teams enrollment:
     1. Visit https://<teams id>.cloudflareaccess.com/warp
@@ -1053,32 +1080,79 @@ Regarding Teams enrollment:
         console.log(document.querySelector(\"meta[http-equiv='refresh']\").content.split(\"=\")[2])
     4. Pass the output as the value for the parameter -t. Example:
         ${0} -t eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.....
+
+Examples:
+    # Use default Tailscale ranges
+    ${0} wgd --ts-dev tailscale0
+
+    # Specify custom Tailscale ranges
+    ${0} wgd --ts-dev tailscale0 --ts-ipv4 100.64.0.0/10 --ts-ipv6 fd7a:115c:a1e0::/48
 "
 }
 
 if [ $# -ge 1 ]; then
     Get_System_Info
-    while getopts ":t:" opt; do
-        case ${opt} in
-        t)
-            teams_ephemeral_token="${OPTARG}"
-            teams_mode=1
-            ;;
-        \?)
-            log ERROR "Invalid option: -$OPTARG"
-            Print_Usage
-            exit 1
-            ;;
-        :)
-            log ERROR "Option -$OPTARG requires an argument."
-            Print_Usage
-            exit 1
-            ;;
+
+    # Initialize variables
+    teams_mode=0
+    teams_ephemeral_token=""
+    command=""
+    tailscale_dev=""
+
+    # Process all arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -t)
+                if [ -z "$2" ]; then
+                    log ERROR "Option -t requires an argument."
+                    Print_Usage
+                    exit 1
+                fi
+                teams_ephemeral_token="$2"
+                teams_mode=1
+                shift 2
+                ;;
+            --ts-dev)
+                if [ -z "$2" ]; then
+                    log ERROR "Option --ts-dev requires an argument."
+                    Print_Usage
+                    exit 1
+                fi
+                tailscale_dev="$2"
+                shift 2
+                ;;
+            --ts-ipv4)
+                if [ -z "$2" ]; then
+                    log ERROR "Option --ts-ipv4 requires an argument."
+                    Print_Usage
+                    exit 1
+                fi
+                Tailscale_IPv4_Range="$2"
+                shift 2
+                ;;
+            --ts-ipv6)
+                if [ -z "$2" ]; then
+                    log ERROR "Option --ts-ipv6 requires an argument."
+                    Print_Usage
+                    exit 1
+                fi
+                Tailscale_IPv6_Range="$2"
+                shift 2
+                ;;
+            install|uninstall|restart|proxy|socks5|s5|unproxy|unsocks5|uns5|wg|wg4|4|wg6|6|wgd|d|wgx|x|rwg|dwg|status|help|version)
+                command="$1"
+                shift
+                ;;
+            *)
+                log ERROR "Invalid Parameters: $*"
+                Print_Usage
+                exit 1
+                ;;
         esac
     done
-    shift $((OPTIND - 1))
 
-    case ${1} in
+    # Execute the command if one was provided
+    case ${command} in
     install)
         Install_WARP_Client
         ;;
@@ -1124,8 +1198,16 @@ if [ $# -ge 1 ]; then
     version)
         echo "${version}"
         ;;
+    "")
+        if [ ${teams_mode} -eq 1 ]; then
+            # If only -t was provided without a command, default to installing the client
+            Install_WARP_Client
+        else
+            Print_Usage
+        fi
+        ;;
     *)
-        log ERROR "Invalid Parameters: $*"
+        log ERROR "Invalid Parameters: $command"
         Print_Usage
         exit 1
         ;;
